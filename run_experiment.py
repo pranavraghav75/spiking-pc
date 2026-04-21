@@ -113,6 +113,29 @@ def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
     return rho, acc, R_list, rdm_inp, rdm_r
 
 
+def eval_class_predictions(model, X_eval, y_eval, verbose=True):
+    """Evaluate direct top-layer class predictions using model.predict_class."""
+    if not model.use_class_area:
+        return float('nan'), np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=float)
+
+    N = len(X_eval)
+    preds = np.zeros(N, dtype=int)
+    for i in range(N):
+        pA = preprocess_image(X_eval[i])
+        preds[i] = model.predict_class(pA)
+        if verbose and (i + 1) % 50 == 0:
+            print(f"    Class pred eval: {i+1}/{N}")
+
+    acc = float(np.mean(preds == y_eval.astype(int))) if N > 0 else float('nan')
+    classes = np.array(sorted(np.unique(y_eval.astype(int))), dtype=int)
+    per_class_acc = np.zeros(len(classes), dtype=float)
+    for i, cls in enumerate(classes):
+        mask = (y_eval.astype(int) == cls)
+        per_class_acc[i] = float(np.mean(preds[mask] == cls)) if np.any(mask) else float('nan')
+
+    return acc, preds, classes, per_class_acc
+
+
 # ─────────────────────────────────────────────────────────────
 # Figure 6
 # ─────────────────────────────────────────────────────────────
@@ -317,6 +340,10 @@ def main():
     parser.add_argument('--no-fig8', dest='no_fig8', action='store_true')
     parser.add_argument('--no-ffg',  dest='no_ffg', action='store_true',
                         help='Disable feedforward gist (PC-only main run).')
+    parser.add_argument('--with-classification', action='store_true',
+                        help='Append a 10-neuron class area and clamp labels during training.')
+    parser.add_argument('--class-clamp-gain', type=float, default=800.0,
+                        help='Clamp current amplitude (pA domain) for class area labels.')
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -336,15 +363,21 @@ def main():
     # ── Train main model ─────────────────────────────────────
     use_ffg_main = not args.no_ffg
     mode_name = 'PC+FFG' if use_ffg_main else 'PC-only'
+    if args.with_classification:
+        mode_name = mode_name + ' + CLS'
     print(f"\n=== Training {mode_name} ===")
     # lr=1e-5, reg=1e-7: learning signal dominates regularization from epoch 1.
     # Paper's lr=1e-7/reg=1e-5 was calibrated for large late-training traces;
     # at initialization the reg term is 35x stronger and erases weights.
     model = SNNPC(use_ffg=use_ffg_main, lr=1e-5, reg=1e-7,
+                  use_class_area=args.with_classification,
+                  cls_clamp_gain=args.class_clamp_gain,
                   rng=np.random.default_rng(42))
     history = train_snn_pc(model, X_tr, y_tr,
                            n_epochs=N_EP, batch_size=BS,
-                           verbose=True, log_interval=1)
+                           verbose=True, log_interval=1,
+                           use_classification=args.with_classification,
+                           class_clamp_gain=args.class_clamp_gain)
 
     np.savez(os.path.join(args.outdir, 'weights.npz'),
              **{f'W{l}': model.areas[l].W for l in range(model.L - 1)})
@@ -353,6 +386,25 @@ def main():
     run_figure6(model, X_tr, y_tr, X_te, y_te, history,
                 outdir=os.path.join(args.outdir, 'fig6'),
                 n_rsa_per_class=NRSA)
+
+    if args.with_classification:
+        print("\n── Classification Prediction Eval (unclamped) ──")
+        cls_acc, cls_preds, cls_labels, cls_per_class_acc = eval_class_predictions(
+            model, X_te, y_te, verbose=True
+        )
+        print(f"  Top-layer argmax accuracy: {cls_acc:.4f}")
+        print("  Per-class accuracy:")
+        for cls, acc_c in zip(cls_labels, cls_per_class_acc):
+            print(f"    Class {int(cls)}: {acc_c:.4f}")
+        np.savez(
+            os.path.join(args.outdir, 'classification_eval.npz'),
+            y_true=y_te,
+            y_pred=cls_preds,
+            accuracy=cls_acc,
+            class_labels=cls_labels,
+            class_accuracy=cls_per_class_acc,
+        )
+        print(f"  Saved: {os.path.join(args.outdir, 'classification_eval.npz')}")
 
     run_figure7(model, X_tr, y_tr, X_te, y_te,
                 outdir=os.path.join(args.outdir, 'fig7'),

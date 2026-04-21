@@ -154,11 +154,16 @@ class SNNPC:
     def __init__(self, area_sizes=None, n_gist=16,
                  dt=1e-3, lr=1e-7, reg=1e-5,
                  tw_ms=100, T_ms=350,
-                 use_ffg=True, syn_gain=1000.0, rng=None):
+                 use_ffg=True, syn_gain=1000.0,
+                 use_class_area=False, n_classes=10,
+                 cls_clamp_gain=800.0, rng=None):
         if area_sizes is None:
             area_sizes = [784, 400, 225, 64]
+        if use_class_area:
+            area_sizes.append(n_classes)
         if rng is None:
             rng = np.random.default_rng(42)
+
         self.area_sizes = area_sizes
         self.L          = len(area_sizes)
         self.dt         = dt
@@ -169,12 +174,30 @@ class SNNPC:
         self.use_ffg    = use_ffg
         self.I_scale    = 1e-12
         self.syn_gain   = syn_gain
+        self.use_class_area = use_class_area
+        self.n_classes = n_classes
+        self.cls_clamp_gain = cls_clamp_gain
         self.areas = []
         for l in range(self.L):
             n_above = area_sizes[l + 1] if l < self.L - 1 else None
             self.areas.append(PCArea(l, area_sizes[l], n_above, rng=rng))
         if use_ffg:
             self.ffg = FFGPathway(area_sizes[0], n_gist, area_sizes, rng=rng)
+
+    def label_clamp_current(self, label: int, gain: float | None = None) -> np.ndarray:
+        if not self.use_class_area:
+            raise ValueError("Classification area is disabled.")
+        if gain is None:
+            gain = self.cls_clamp_gain
+        clamp = np.zeros(self.area_sizes[-1], dtype=np.float64)
+        clamp[label] = gain
+        return clamp
+
+    def predict_class(self, pixel_pA: np.ndarray) -> int:
+        if not self.use_class_area:
+            raise ValueError("Classification area is disabled.")
+        X_R, _, _ = self.run_sample_full(pixel_pA, class_label=None)
+        return int(np.argmax(X_R[self.L - 1]))
 
     def reset_all(self):
         for area in self.areas:
@@ -215,7 +238,8 @@ class SNNPC:
     #         areas[l].R.step(I_R)
 
 # take out gain from all functions
-    def step(self, pixel_pA: np.ndarray):
+    def step(self, pixel_pA: np.ndarray, class_label: int | None = None,
+             class_clamp_gain: float | None = None):
         areas = self.areas
         dt = self.dt
         gain = self.syn_gain
@@ -249,13 +273,20 @@ class SNNPC:
 
             I_R = (bu_p - bu_n - td_p + td_n) * gain * scale
 
-            
             # if self.use_ffg:
             #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
 
-            areas[l + 1].R.step(I_R)
+            # Optional supervised label clamp on the top class area.
+            if self.use_class_area and class_label is not None and (l + 1) == (self.L - 1):
+                I_R = I_R + self.label_clamp_current(class_label, class_clamp_gain) * scale
 
-    def run_sample_full(self, pixel_pA: np.ndarray):
+            areas[l + 1].R.step(I_R)
+            # make I_R equal to arbitrarily high number, and set correct neuron in last area of neurons equal to I_R, everything else 0 and take out label_clamp_current
+            # fired = (self.V > VT) & (~in_ref), make fired (in nueron class) equal to True to intentioally control spike rate (determine some k for how many iterations we set fired equal to true)
+ 
+
+    def run_sample_full(self, pixel_pA: np.ndarray, class_label: int | None = None,
+                        class_clamp_gain: float | None = None):
         self.reset_all()
         n  = self.T
         tw = self.tw
@@ -263,7 +294,8 @@ class SNNPC:
         EP_buf = {l: [] for l in range(self.L - 1)}
         EN_buf = {l: [] for l in range(self.L - 1)}
         for t in range(n):
-            self.step(pixel_pA)
+            self.step(pixel_pA, class_label=class_label,
+                      class_clamp_gain=class_clamp_gain)
             if t >= n - tw:
                 for l in range(self.L):
                     R_buf[l].append(self.areas[l].R.X.copy())
@@ -321,27 +353,39 @@ def compute_nrmse(actual, predicted):
 
 def train_snn_pc(model: SNNPC, X_train, y_train,
                  n_epochs=50, batch_size=32,
-                 verbose=True, log_interval=5):
+                 verbose=True, log_interval=5,
+                 use_classification=False,
+                 class_clamp_gain: float | None = None):
     N = len(X_train)
     n_batches = N // batch_size
     rng = np.random.default_rng(0)
     history = {
         'nrmse'     : {l: [] for l in range(model.L - 1)},
+        'cls_acc'   : [],
         'epoch_time': []
     }
     for epoch in range(n_epochs):
         t0      = time.time()
         perm    = rng.permutation(N)
         ep_nrmse = {l: [] for l in range(model.L - 1)}
+        ep_cls_acc = []
         for b in range(n_batches):
             idx = perm[b * batch_size: (b + 1) * batch_size]
             X_R_b, X_EP_b, X_EN_b = [], [], []
             for i in idx:
                 pA = preprocess_image(X_train[i])
-                X_R, X_EP, X_EN = model.run_sample_full(pA)
+                label = int(y_train[i]) if (use_classification and model.use_class_area) else None
+                X_R, X_EP, X_EN = model.run_sample_full(
+                    pA,
+                    class_label=label,
+                    class_clamp_gain=class_clamp_gain,
+                )
                 X_R_b.append(X_R)
                 X_EP_b.append(X_EP)
                 X_EN_b.append(X_EN)
+                if use_classification and model.use_class_area:
+                    pred = int(np.argmax(X_R[model.L - 1]))
+                    ep_cls_acc.append(1.0 if pred == int(y_train[i]) else 0.0)
                 for l in range(model.L - 1):
                     pred = model.areas[l].W @ X_R[l + 1]
                     ep_nrmse[l].append(compute_nrmse(X_R[l], pred))
@@ -349,13 +393,24 @@ def train_snn_pc(model: SNNPC, X_train, y_train,
         elapsed = time.time() - t0
         for l in range(model.L - 1):
             history['nrmse'][l].append(float(np.mean(ep_nrmse[l])))
+        history['cls_acc'].append(
+            float(np.mean(ep_cls_acc))
+            if (use_classification and model.use_class_area and len(ep_cls_acc) > 0)
+            else float('nan')
+        )
         history['epoch_time'].append(elapsed)
 
         if verbose and (epoch % log_interval == 0 or epoch == n_epochs - 1):
             nstr = '  |  '.join(
                 f"Area{l+1}: {history['nrmse'][l][-1]:.4f}"
                 for l in range(model.L - 1))
-            print(f"  Epoch {epoch+1:3d}/{n_epochs}  |  {nstr}  |  {elapsed:.1f}s")
+            if use_classification and model.use_class_area:
+                print(
+                    f"  Epoch {epoch+1:3d}/{n_epochs}  |  {nstr}"
+                    f"  |  ClsAcc: {history['cls_acc'][-1]:.3f}  |  {elapsed:.1f}s"
+                )
+            else:
+                print(f"  Epoch {epoch+1:3d}/{n_epochs}  |  {nstr}  |  {elapsed:.1f}s")
     return history
 
 
@@ -424,10 +479,3 @@ def linear_decode(R_tr, y_tr, R_te, y_te):
     clf = LogisticRegression(max_iter=1000, C=1.0, random_state=0)
     clf.fit(R_tr, y_tr)
     return float(clf.score(R_te, y_te)), clf
-
-
-
-# add ten as seperate area for classification
-# ovewrite all neurons correspndong to input image
-    # essentially turning on and off based on right/wrong digit (class)
-    # info passing throughs ame way as other areas
