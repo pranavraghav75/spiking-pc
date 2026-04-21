@@ -315,6 +315,8 @@ def main():
     parser.add_argument('--smoke',   action='store_true')
     parser.add_argument('--outdir',  default='results')
     parser.add_argument('--no-fig8', dest='no_fig8', action='store_true')
+    parser.add_argument('--no-ffg',  dest='no_ffg', action='store_true',
+                        help='Disable feedforward gist (PC-only main run).')
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -331,12 +333,15 @@ def main():
                                           n_test_per_class=N_TE)
     print(f"  Train: {X_tr.shape}  Test: {X_te.shape}")
 
-    # ── Train PC+FFG ─────────────────────────────────────────
-    print("\n=== Training PC+FFG ===")
+    # ── Train main model ─────────────────────────────────────
+    use_ffg_main = not args.no_ffg
+    mode_name = 'PC+FFG' if use_ffg_main else 'PC-only'
+    print(f"\n=== Training {mode_name} ===")
     # lr=1e-5, reg=1e-7: learning signal dominates regularization from epoch 1.
     # Paper's lr=1e-7/reg=1e-5 was calibrated for large late-training traces;
     # at initialization the reg term is 35x stronger and erases weights.
-    model = SNNPC(use_ffg=True, lr=1e-5, reg=1e-7, rng=np.random.default_rng(42))
+    model = SNNPC(use_ffg=use_ffg_main, lr=1e-5, reg=1e-7,
+                  rng=np.random.default_rng(42))
     history = train_snn_pc(model, X_tr, y_tr,
                            n_epochs=N_EP, batch_size=BS,
                            verbose=True, log_interval=1)
@@ -353,11 +358,13 @@ def main():
                 outdir=os.path.join(args.outdir, 'fig7'),
                 n_per_class=NRSA, n_rep=NREP)
 
-    if not args.no_fig8:
+    if use_ffg_main and not args.no_fig8:
         run_figure8(X_tr, y_tr, X_te, y_te,
                     outdir=os.path.join(args.outdir, 'fig8'),
                     n_epochs=N_EP, batch_size=BS,
                     n_per_class=NRSA)
+    elif not args.no_fig8:
+        print("  Skipping Fig 8 ablation because main run is PC-only (--no-ffg).")
 
     print(f"\n=== Done. Results in: {args.outdir}/ ===")
 

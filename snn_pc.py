@@ -34,7 +34,7 @@ GL       = 30e-9
 EL       = -70.6e-3
 VT       = -50.4e-3
 DELTA_T  = 2e-3
-TREF     = 2
+TREF     = 2 # refractory period, each step is 1 ms -> 2 step refractory
 C_ADP    = 4e-9
 B_ADP    = 0.0805e-9
 TAU_A    = 144e-3
@@ -61,7 +61,7 @@ class NeuronGroup:
         dt = self.dt
         V  = self.V
         a  = self.a
-        exp_arg  = np.clip((V - VT) / DELTA_T, -30.0, 20.0)
+        exp_arg  = np.clip((V - VT) / DELTA_T, -30.0, 20.0) # remove clip function here
         exp_term = GL * DELTA_T * np.exp(exp_arg)
         dV = (-GL * (V - EL) + exp_term + I_ext - a) / CM * dt
         da = (C_ADP * (V - EL) - a) / TAU_A * dt
@@ -81,7 +81,7 @@ class NeuronGroup:
         self.X += dX
         self.Y += dY
         self.X  = np.maximum(self.X, 0.0)
-        self.Y  = np.maximum(self.Y, 0.0)
+        self.Y  = np.maximum(self.Y, 0.0) 
 
     def reset(self):
         self.V[:]   = EL
@@ -154,7 +154,7 @@ class SNNPC:
     def __init__(self, area_sizes=None, n_gist=16,
                  dt=1e-3, lr=1e-7, reg=1e-5,
                  tw_ms=100, T_ms=350,
-                 use_ffg=True, rng=None):
+                 use_ffg=True, syn_gain=1000.0, rng=None):
         if area_sizes is None:
             area_sizes = [784, 400, 225, 64]
         if rng is None:
@@ -168,7 +168,7 @@ class SNNPC:
         self.T          = int(T_ms  / (dt * 1000))
         self.use_ffg    = use_ffg
         self.I_scale    = 1e-12
-        self.syn_gain   = 100.0
+        self.syn_gain   = syn_gain
         self.areas = []
         for l in range(self.L):
             n_above = area_sizes[l + 1] if l < self.L - 1 else None
@@ -182,29 +182,78 @@ class SNNPC:
         if self.use_ffg:
             self.ffg.reset()
 
+    # def step(self, pixel_pA: np.ndarray):
+    #     areas = self.areas
+    #     dt    = self.dt
+    #     gain  = self.syn_gain # figure out, dont know what this is
+    #     scale = self.I_scale # figure out, dont know what this is
+    #     if self.use_ffg:
+    #         self.ffg.step(areas[0].R.X, dt)
+        
+    #     # starting at R0, then update E0+ and E0-, then update R1 and E1+ and E1-
+    #     for l in range(self.L - 1):
+    #         X_R_below = areas[l].R.X
+    #         pred = areas[l].W @ areas[l + 1].R.X
+    #         # compute spike trace layer by layer, use to update next level
+    #         areas[l].EP.step((X_R_below - pred) * gain * scale)
+    #         areas[l].EN.step((pred - X_R_below) * gain * scale)
+    #         # areas[l].EP.step(X_R_below - pred)
+    #         # areas[l].EN.step(pred - X_R_below)
+    #     areas[0].R.step(pixel_pA * scale)
+    #     # areas[0].R.step(pixel_pA)
+    #     for l in range(1, self.L):
+    #         W_below = areas[l - 1].W
+    #         bu_p = W_below.T @ areas[l - 1].EP.X
+    #         bu_n = W_below.T @ areas[l - 1].EN.X
+    #         td_p = areas[l].EP.X
+    #         td_n = areas[l].EN.X
+    #         I_R = (bu_p - bu_n - td_p + td_n) * gain * scale
+    #         # I_R = (bu_p - bu_n - td_p + td_n)
+    #         if self.use_ffg:
+    #             I_R = I_R + self.ffg.gist_input(l) * gain * scale
+    #             # I_R = I_R + self.ffg.gist_input(l)
+    #         areas[l].R.step(I_R)
+
+# take out gain from all functions
     def step(self, pixel_pA: np.ndarray):
         areas = self.areas
-        dt    = self.dt
-        gain  = self.syn_gain
+        dt = self.dt
+        gain = self.syn_gain
         scale = self.I_scale
-        if self.use_ffg:
-            self.ffg.step(areas[0].R.X, dt)
-        for l in range(self.L - 1):
-            X_R_below = areas[l].R.X
-            pred = areas[l].W @ areas[l + 1].R.X
-            areas[l].EP.step((X_R_below - pred) * gain * scale)
-            areas[l].EN.step((pred - X_R_below) * gain * scale)
+
+        # if self.use_ffg:
+        #     self.ffg.step(areas[0].R.X, dt)
+
         areas[0].R.step(pixel_pA * scale)
-        for l in range(1, self.L):
-            W_below = areas[l - 1].W
-            bu_p = W_below.T @ areas[l - 1].EP.X
-            bu_n = W_below.T @ areas[l - 1].EN.X
-            td_p = areas[l].EP.X
-            td_n = areas[l].EN.X
+        td_p = 0.0
+        td_n = 0.0
+
+        for l in range(self.L - 1):
+            pred = areas[l].W @ areas[l + 1].R.X
+            X_R_current = areas[l].R.X
+            
+            areas[l].EP.step((X_R_current - pred) * gain * scale)
+            areas[l].EN.step((pred - X_R_current) * gain * scale)
+
+            W_below = areas[l].W
+            bu_p = W_below.T @ areas[l].EP.X
+            bu_n = W_below.T @ areas[l].EN.X
+
+
+            if l + 1 < self.L - 1:
+                td_p = areas[l + 1].EP.X
+                td_n = areas[l + 1].EN.X
+            else:
+                td_p = 0.0
+                td_n = 0.0
+
             I_R = (bu_p - bu_n - td_p + td_n) * gain * scale
-            if self.use_ffg:
-                I_R = I_R + self.ffg.gist_input(l) * gain * scale
-            areas[l].R.step(I_R)
+
+            
+            # if self.use_ffg:
+            #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
+
+            areas[l + 1].R.step(I_R)
 
     def run_sample_full(self, pixel_pA: np.ndarray):
         self.reset_all()
@@ -301,6 +350,7 @@ def train_snn_pc(model: SNNPC, X_train, y_train,
         for l in range(model.L - 1):
             history['nrmse'][l].append(float(np.mean(ep_nrmse[l])))
         history['epoch_time'].append(elapsed)
+
         if verbose and (epoch % log_interval == 0 or epoch == n_epochs - 1):
             nstr = '  |  '.join(
                 f"Area{l+1}: {history['nrmse'][l][-1]:.4f}"
@@ -374,3 +424,10 @@ def linear_decode(R_tr, y_tr, R_te, y_te):
     clf = LogisticRegression(max_iter=1000, C=1.0, random_state=0)
     clf.fit(R_tr, y_tr)
     return float(clf.score(R_te, y_te)), clf
+
+
+
+# add ten as seperate area for classification
+# ovewrite all neurons correspndong to input image
+    # essentially turning on and off based on right/wrong digit (class)
+    # info passing throughs ame way as other areas
