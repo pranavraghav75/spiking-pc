@@ -18,6 +18,9 @@ FIX vs original:
   Area 0. 1.0/n_R_above delivers ~900 pA, comfortably above threshold.
 """
 
+
+# ******* changes made from ~ 286 to 317 *******
+
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -188,14 +191,14 @@ class SNNPC:
         if use_ffg:
             self.ffg = FFGPathway(area_sizes[0], n_gist, area_sizes, rng=rng)
 
-    def label_clamp_current(self, label: int, gain: float | None = None) -> np.ndarray:
-        if not self.use_class_area:
-            raise ValueError("Classification area is disabled.")
-        if gain is None:
-            gain = self.cls_clamp_gain
-        clamp = np.zeros(self.area_sizes[-1], dtype=np.float64)
-        clamp[label] = gain
-        return clamp
+    # def label_clamp_current(self, label: int, gain: float | None = None) -> np.ndarray:
+    #     if not self.use_class_area:
+    #         raise ValueError("Classification area is disabled.")
+    #     if gain is None:
+    #         gain = self.cls_clamp_gain
+    #     clamp = np.zeros(self.area_sizes[-1], dtype=np.float64)
+    #     clamp[label] = gain
+    #     return clamp
 
     def predict_class(self, pixel_pA: np.ndarray) -> int:
         if not self.use_class_area:
@@ -242,7 +245,6 @@ class SNNPC:
     #             # I_R = I_R + self.ffg.gist_input(l)
     #         areas[l].R.step(I_R)
 
-# take out gain from all functions
     def step(self, pixel_pA: np.ndarray, class_label: int | None = None,
              class_clamp_gain: float | None = None):
         areas = self.areas
@@ -281,32 +283,41 @@ class SNNPC:
             # if self.use_ffg:
             #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
 
-            # In supervised class mode, do not inject top-layer current.
-            # Top class spikes are controlled explicitly below every k steps.
+            # ******* changes made here *******
             if self.use_class_area and class_label is not None and (l + 1) == (self.L - 1):
                 I_R = np.zeros_like(I_R)
+                # setting top layer (classification area at the end) all to zeros
 
             areas[l + 1].R.step(I_R)
 
-            if (
-                self.use_class_area
-                and class_label is not None
-                and (l + 1) == (self.L - 1)
-            ):
-                top = areas[l + 1].R
-                top.spk[:] = False
-                top.Y[:] = 0.0
-                if (
-                    self.cls_force_spike_every > 0
-                    and (self._step_idx % self.cls_force_spike_every == 0)
-                ):
-                    top.spk[class_label] = True
-                    top.Y[class_label] = 1.0
-                    top.V[class_label] = VR
-                    top.a[class_label] += B_ADP
-                    top.ref[class_label] = TREF
+            # in the case that were doing classification, after injecting the top layer with zero current
+            # we intentionally spike every {cls_force_spike_every} iterations
+            if (self.use_class_area and class_label is not None and (l + 1) == (self.L - 1)):
+                top_area = areas[l + 1].R
+                # essentially resetting all spike traces in case any are lingering before manual spiking
+                top_area.spk[:] = False
+                top_area.Y[:] = 0.0
+
+                if (self.cls_force_spike_every > 0
+                    and (self._step_idx % self.cls_force_spike_every == 0)):
+                    top_area.spk[class_label] = True
+                    top_area.Y[class_label] = 1.0
+                    top_area.V[class_label] = VR
+                    top_area.a[class_label] += B_ADP
+                    top_area.ref[class_label] = TREF
+
+                    '''for reference this happens where a neuron spikes, we apply the same process here:
+                    self.spk[:] = fired    
+                    ^^^ we use [:] here since normal spiking doesn't know exactly which neuron, we're doing it in a targetted way so we can directly index
+                    self.Y[fired] = 1.0
+                    self.V[fired] = VR
+                    self.a[fired] += B_ADP
+                    self.ref[fired] = TREF
+                    
+                    in this case, we're focing only the target cllass neuron to spike by index'''
 
         self._step_idx += 1
+        # counting every simluation, so we can count every {cls_force_spike_every} spikes
  
 
     def run_sample_full(self, pixel_pA: np.ndarray, class_label: int | None = None,
