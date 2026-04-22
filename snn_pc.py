@@ -276,12 +276,11 @@ class SNNPC:
             # if self.use_ffg:
             #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
 
-            # Optional supervised label clamp on the top class area.
+            # target class gets fixed clamp current, all others are forced to 0.
             if self.use_class_area and class_label is not None and (l + 1) == (self.L - 1):
-                I_R = I_R + self.label_clamp_current(class_label, class_clamp_gain) * scale
+                I_R = self.label_clamp_current(class_label, class_clamp_gain) * scale
 
             areas[l + 1].R.step(I_R)
-            # make I_R equal to arbitrarily high number, and set correct neuron in last area of neurons equal to I_R, everything else 0 and take out label_clamp_current
             # fired = (self.V > VT) & (~in_ref), make fired (in nueron class) equal to True to intentioally control spike rate (determine some k for how many iterations we set fired equal to true)
  
 
