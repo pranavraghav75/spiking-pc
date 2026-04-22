@@ -18,6 +18,9 @@ FIX vs original:
   Area 0. 1.0/n_R_above delivers ~900 pA, comfortably above threshold.
 """
 
+
+# changes made at 280ish
+
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -276,12 +279,12 @@ class SNNPC:
             # if self.use_ffg:
             #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
 
-            # target class gets fixed clamp current, all others are forced to 0.
             if self.use_class_area and class_label is not None and (l + 1) == (self.L - 1):
                 I_R = self.label_clamp_current(class_label, class_clamp_gain) * scale
+                # initially was set as I_R += clamp_current, now we just set I_R to clamp_current
+                # this isn't a gaurantee spike, we're just injecting this signal (clamp_current)
 
             areas[l + 1].R.step(I_R)
-            # fired = (self.V > VT) & (~in_ref), make fired (in nueron class) equal to True to intentioally control spike rate (determine some k for how many iterations we set fired equal to true)
  
 
     def run_sample_full(self, pixel_pA: np.ndarray, class_label: int | None = None,
