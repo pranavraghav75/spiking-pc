@@ -344,6 +344,8 @@ def main():
                         help='Append a 10-neuron class area and clamp labels during training.')
     parser.add_argument('--class-clamp-gain', type=float, default=800.0,
                         help='Clamp current amplitude (pA domain) for class area labels.')
+    parser.add_argument('--class-force-spike-every', type=int, default=0,
+                        help='If >0, force a target-class spike every k simulation steps during clamped training.')
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -372,6 +374,7 @@ def main():
     model = SNNPC(use_ffg=use_ffg_main, lr=1e-5, reg=1e-7,
                   use_class_area=args.with_classification,
                   cls_clamp_gain=args.class_clamp_gain,
+                  cls_force_spike_every=args.class_force_spike_every,
                   rng=np.random.default_rng(42))
     history = train_snn_pc(model, X_tr, y_tr,
                            n_epochs=N_EP, batch_size=BS,

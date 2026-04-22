@@ -156,7 +156,9 @@ class SNNPC:
                  tw_ms=100, T_ms=350,
                  use_ffg=True, syn_gain=1000.0,
                  use_class_area=False, n_classes=10,
-                 cls_clamp_gain=800.0, rng=None):
+                 cls_clamp_gain=800.0,
+                 cls_force_spike_every=0,
+                 rng=None):
         if area_sizes is None:
             area_sizes = [784, 400, 225, 64]
         if use_class_area:
@@ -177,6 +179,8 @@ class SNNPC:
         self.use_class_area = use_class_area
         self.n_classes = n_classes
         self.cls_clamp_gain = cls_clamp_gain
+        self.cls_force_spike_every = cls_force_spike_every
+        self._step_idx = 0
         self.areas = []
         for l in range(self.L):
             n_above = area_sizes[l + 1] if l < self.L - 1 else None
@@ -204,6 +208,7 @@ class SNNPC:
             area.reset()
         if self.use_ffg:
             self.ffg.reset()
+        self._step_idx = 0
 
     # def step(self, pixel_pA: np.ndarray):
     #     areas = self.areas
@@ -276,12 +281,32 @@ class SNNPC:
             # if self.use_ffg:
             #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
 
-            # target class gets fixed clamp current, all others are forced to 0.
+            # In supervised class mode, do not inject top-layer current.
+            # Top class spikes are controlled explicitly below every k steps.
             if self.use_class_area and class_label is not None and (l + 1) == (self.L - 1):
-                I_R = self.label_clamp_current(class_label, class_clamp_gain) * scale
+                I_R = np.zeros_like(I_R)
 
             areas[l + 1].R.step(I_R)
-            # fired = (self.V > VT) & (~in_ref), make fired (in nueron class) equal to True to intentioally control spike rate (determine some k for how many iterations we set fired equal to true)
+
+            if (
+                self.use_class_area
+                and class_label is not None
+                and (l + 1) == (self.L - 1)
+            ):
+                top = areas[l + 1].R
+                top.spk[:] = False
+                top.Y[:] = 0.0
+                if (
+                    self.cls_force_spike_every > 0
+                    and (self._step_idx % self.cls_force_spike_every == 0)
+                ):
+                    top.spk[class_label] = True
+                    top.Y[class_label] = 1.0
+                    top.V[class_label] = VR
+                    top.a[class_label] += B_ADP
+                    top.ref[class_label] = TREF
+
+        self._step_idx += 1
  
 
     def run_sample_full(self, pixel_pA: np.ndarray, class_label: int | None = None,
