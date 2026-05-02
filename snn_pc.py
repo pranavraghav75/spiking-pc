@@ -99,7 +99,7 @@ class FFGPathway:
     def __init__(self, n_input: int, n_gist: int,
                  area_sizes: list, pc: float = 0.05, rng=None):
         if rng is None:
-            rng = np.random.default_rng(0)
+            rng = np.random.default_rng()
         self.n_gist = n_gist
         self.G = NeuronGroup(n_gist)
         ratio_ig = n_input / n_gist
@@ -127,7 +127,7 @@ class FFGPathway:
 class PCArea:
     def __init__(self, l: int, n_R: int, n_R_above=None, rng=None):
         if rng is None:
-            rng = np.random.default_rng(0)
+            rng = np.random.default_rng()
         self.l   = l
         self.n_R = n_R
         self.R   = NeuronGroup(n_R)
@@ -158,7 +158,7 @@ class SNNPC:
         if area_sizes is None:
             area_sizes = [784, 400, 225, 64]
         if rng is None:
-            rng = np.random.default_rng(42)
+            rng = np.random.default_rng()
         self.area_sizes = area_sizes
         self.L          = len(area_sizes)
         self.dt         = dt
@@ -321,10 +321,12 @@ def compute_nrmse(actual, predicted):
 
 def train_snn_pc(model: SNNPC, X_train, y_train,
                  n_epochs=50, batch_size=32,
-                 verbose=True, log_interval=5):
+                 verbose=True, log_interval=5,
+                 rng=None):
     N = len(X_train)
     n_batches = N // batch_size
-    rng = np.random.default_rng(0)
+    if rng is None:
+        rng = np.random.default_rng()
     history = {
         'nrmse'     : {l: [] for l in range(model.L - 1)},
         'epoch_time': []
@@ -386,7 +388,7 @@ def second_order_rsa(rdm_a: np.ndarray, rdm_b: np.ndarray) -> float:
 # ─────────────────────────────────────────────────────────────
 def add_noise(X: np.ndarray, sigma_pA: float = 300.0, rng=None) -> np.ndarray:
     if rng is None:
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng()
     sigma_px = sigma_pA * 255.0 / 3000.0
     noise    = rng.normal(0.0, sigma_px, X.shape)
     return np.clip(X.astype(np.float64) + noise, 0.0, 255.0)
@@ -394,7 +396,7 @@ def add_noise(X: np.ndarray, sigma_pA: float = 300.0, rng=None) -> np.ndarray:
 
 def add_occlusion(X: np.ndarray, patch_size: int = 9, rng=None) -> np.ndarray:
     if rng is None:
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng()
     out  = X.copy().astype(np.float64)
     imgs = out.reshape(-1, 28, 28)
     for img in imgs:
