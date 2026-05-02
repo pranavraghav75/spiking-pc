@@ -22,7 +22,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, rankdata
 import os, time, warnings
 warnings.filterwarnings('ignore')
 
@@ -362,8 +362,10 @@ def train_snn_pc(model: SNNPC, X_train, y_train,
 # ─────────────────────────────────────────────────────────────
 # 7.  RSA Utilities
 # ─────────────────────────────────────────────────────────────
+# spearman's correlation distance
 def compute_rdm(representations: np.ndarray) -> np.ndarray:
-    X    = representations - representations.mean(axis=1, keepdims=True)
+    Xr = rankdata(representations, axis=1, method='average')
+    X    = Xr - Xr.mean(axis=1, keepdims=True)
     nrm  = np.linalg.norm(X, axis=1, keepdims=True)
     nrm  = np.maximum(nrm, 1e-10)
     X    = X / nrm
