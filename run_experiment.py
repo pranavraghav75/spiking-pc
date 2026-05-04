@@ -89,7 +89,7 @@ def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
     Returns: rho (RSA vs input), decode_acc
     """
     if rng is None:
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng()
     if n_per_class is not None:
         idx = []
         for c in sorted(set(y_eval)):
@@ -154,7 +154,7 @@ def run_figure6(model, X_train, y_train, X_test, y_test,
         outpath=os.path.join(outdir, 'fig6A_recon.png'))
 
     # RSA
-    rng = np.random.default_rng(7)
+    rng = np.random.default_rng()
     idx = []
     for c in sorted(set(y_test)):
         ci = np.where(y_test == c)[0]
@@ -198,7 +198,7 @@ def run_figure7(model, X_train, y_train, X_test, y_test, outdir,
                 n_per_class=12, n_rep=5):
     print("\n── Figure 7: Robustness ──")
     os.makedirs(outdir, exist_ok=True)
-    rng = np.random.default_rng(2)
+    rng = np.random.default_rng()
 
     rho_results = {k: [] for k in ('Clean', 'Noise', 'Occlude')}
     acc_results = {k: [] for k in ('Clean', 'Noise', 'Occlude')}
@@ -264,20 +264,20 @@ def run_figure8(X_train, y_train, X_test, y_test, outdir,
     trained = {}
     for name, use_ffg in [('PC+FFG', True), ('PC-only', False)]:
         print(f"\n  Training {name}...")
-        m = SNNPC(use_ffg=use_ffg, lr=1e-5, reg=1e-7, rng=np.random.default_rng(42))
+        m = SNNPC(use_ffg=use_ffg, lr=1e-5, reg=1e-7, rng=np.random.default_rng())
         h = train_snn_pc(m, X_train, y_train, n_epochs=n_epochs,
                          batch_size=batch_size, verbose=verbose)
         trained[name] = m
 
     # FFG-only: zero out PC weights on a fresh PC+FFG model
     print("\n  Building FFG-only (W=0) model...")
-    m_fgo = SNNPC(use_ffg=True, rng=np.random.default_rng(42))
+    m_fgo = SNNPC(use_ffg=True, rng=np.random.default_rng())
     for l in range(m_fgo.L - 1):
         m_fgo.areas[l].W[:] = 0.0
     trained['FFG-only'] = m_fgo
 
     # Evaluation set
-    rng = np.random.default_rng(11)
+    rng = np.random.default_rng()
     idx = []
     for c in sorted(set(y_test)):
         ci  = np.where(y_test == c)[0]
@@ -372,7 +372,7 @@ def main():
     model = SNNPC(use_ffg=use_ffg_main, lr=1e-5, reg=1e-7,
                   use_class_area=args.with_classification,
                   cls_clamp_gain=args.class_clamp_gain,
-                  rng=np.random.default_rng(42))
+                  rng=np.random.default_rng())
     history = train_snn_pc(model, X_tr, y_tr,
                            n_epochs=N_EP, batch_size=BS,
                            verbose=True, log_interval=1,
