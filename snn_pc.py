@@ -95,6 +95,54 @@ class NeuronGroup:
         self.ref[:] = 0
 
 
+class NeuronGroupBatched:
+    """Same dynamics as NeuronGroup, but state is (batch, n) for vectorized rollout."""
+
+    def __init__(self, batch: int, n: int, dt: float = 1e-3):
+        self.B = int(batch)
+        self.n = int(n)
+        self.dt = dt
+        self.V = np.full((self.B, self.n), EL, dtype=np.float64)
+        self.a = np.zeros((self.B, self.n), dtype=np.float64)
+        self.Y = np.zeros((self.B, self.n), dtype=np.float64)
+        self.X = np.zeros((self.B, self.n), dtype=np.float64)
+        self.spk = np.zeros((self.B, self.n), dtype=bool)
+        self.ref = np.zeros((self.B, self.n), dtype=np.int32)
+
+    def step(self, I_ext: np.ndarray):
+        dt = self.dt
+        V, a = self.V, self.a
+        exp_arg = np.clip((V - VT) / DELTA_T, -30.0, 20.0)
+        exp_term = GL * DELTA_T * np.exp(exp_arg)
+        dV = (-GL * (V - EL) + exp_term + I_ext - a) / CM * dt
+        da = (C_ADP * (V - EL) - a) / TAU_A * dt
+        self.V += dV
+        self.a += da
+        in_ref = self.ref > 0
+        self.V[in_ref] = VR
+        self.ref[in_ref] -= 1
+        fired = (self.V > VT) & (~in_ref)
+        self.spk[:] = fired
+        self.V[fired] = VR
+        self.a[fired] += B_ADP
+        self.ref[fired] = TREF
+        self.Y[fired] = 1.0
+        dX = (self.Y / TAU_RISE - self.X / TAU_DEC) * dt
+        dY = (-self.Y / TAU_DEC) * dt
+        self.X += dX
+        self.Y += dY
+        self.X = np.maximum(self.X, 0.0)
+        self.Y = np.maximum(self.Y, 0.0)
+
+    def reset(self):
+        self.V[:] = EL
+        self.a[:] = 0.0
+        self.Y[:] = 0.0
+        self.X[:] = 0.0
+        self.spk[:] = False
+        self.ref[:] = 0
+
+
 # ─────────────────────────────────────────────────────────────
 # 2.  Feedforward Gist (FFG) Pathway
 # ─────────────────────────────────────────────────────────────
@@ -186,6 +234,12 @@ class SNNPC:
         if use_ffg:
             self.ffg = FFGPathway(area_sizes[0], n_gist, area_sizes, rng=rng)
 
+        # Lazy-allocated batched neuron groups (size matches training batch_size).
+        self._batch_B = None
+        self._batched_areas_R = None
+        self._batched_EP = None
+        self._batched_EN = None
+
     def label_clamp_current(self, label: int, gain: float | None = None) -> np.ndarray:
         if not self.use_class_area:
             raise ValueError("Classification area is disabled.")
@@ -200,6 +254,15 @@ class SNNPC:
             raise ValueError("Classification area is disabled.")
         X_R, _, _ = self.run_sample_full(pixel_pA, class_label=None)
         return int(np.argmax(X_R[self.L - 1]))
+
+    def predict_classes_batch(self, pixel_pA_B: np.ndarray) -> np.ndarray:
+        """Argmax class index per row; unclamped forward pass."""
+        if not self.use_class_area:
+            raise ValueError("Classification area is disabled.")
+        X_R, _, _ = self.run_batch_full(
+            pixel_pA_B, class_labels=None, class_clamp_gain=None
+        )
+        return np.argmax(X_R[self.L - 1], axis=1).astype(np.int64)
 
     def reset_all(self):
         for area in self.areas:
@@ -308,6 +371,118 @@ class SNNPC:
         X_EN = {l: np.mean(EN_buf[l], axis=0) for l in range(self.L - 1)}
         return X_R, X_EP, X_EN
 
+    def _ensure_batch_buffers(self, B: int):
+        if self._batch_B == B and self._batched_areas_R is not None:
+            return
+        self._batch_B = B
+        self._batched_areas_R = [
+            NeuronGroupBatched(B, self.area_sizes[l]) for l in range(self.L)
+        ]
+        self._batched_EP = [
+            NeuronGroupBatched(B, self.area_sizes[l]) for l in range(self.L - 1)
+        ]
+        self._batched_EN = [
+            NeuronGroupBatched(B, self.area_sizes[l]) for l in range(self.L - 1)
+        ]
+
+    def _step_batched(
+        self,
+        pixel_pA_B: np.ndarray,
+        class_labels: np.ndarray | None,
+        class_clamp_gain: float | None,
+    ):
+        gain = self.syn_gain
+        scale = self.I_scale
+        R = self._batched_areas_R
+        EP = self._batched_EP
+        EN = self._batched_EN
+        B = int(pixel_pA_B.shape[0])
+
+        R[0].step(pixel_pA_B * scale)
+
+        for l in range(self.L - 1):
+            W = self.areas[l].W
+            pred = R[l + 1].X @ W.T
+            x_cur = R[l].X
+            EP[l].step((x_cur - pred) * gain * scale)
+            EN[l].step((pred - x_cur) * gain * scale)
+
+            bu_p = EP[l].X @ W
+            bu_n = EN[l].X @ W
+
+            if l + 1 < self.L - 1:
+                td_p = EP[l + 1].X
+                td_n = EN[l + 1].X
+            else:
+                td_p = np.zeros_like(bu_p)
+                td_n = np.zeros_like(bu_n)
+
+            I_R = (bu_p - bu_n - td_p + td_n) * gain * scale
+
+            if (
+                self.use_class_area
+                and class_labels is not None
+                and (l + 1) == (self.L - 1)
+            ):
+                g = (
+                    self.cls_clamp_gain
+                    if class_clamp_gain is None
+                    else class_clamp_gain
+                )
+                I_R = np.zeros((B, self.area_sizes[-1]), dtype=np.float64)
+                I_R[np.arange(B), class_labels.astype(np.int64)] = g * scale
+
+            R[l + 1].step(I_R)
+
+    def run_batch_full(
+        self,
+        pixel_pA_B: np.ndarray,
+        class_labels: np.ndarray | None = None,
+        class_clamp_gain: float | None = None,
+    ):
+        """
+        Run B samples in parallel (vectorized over batch).
+        pixel_pA_B: (B, n0) preprocessed currents; class_labels: (B,) or None.
+        Returns X_R, X_EP, X_EN with arrays shaped (B, n_l) per level.
+        """
+        B = int(pixel_pA_B.shape[0])
+        self._ensure_batch_buffers(B)
+        for g in self._batched_areas_R:
+            g.reset()
+        for g in self._batched_EP:
+            g.reset()
+        for g in self._batched_EN:
+            g.reset()
+
+        n = self.T
+        tw = self.tw
+        R_buf = {l: [] for l in range(self.L)}
+        EP_buf = {l: [] for l in range(self.L - 1)}
+        EN_buf = {l: [] for l in range(self.L - 1)}
+
+        for t in range(n):
+            self._step_batched(pixel_pA_B, class_labels, class_clamp_gain)
+            if t >= n - tw:
+                for l in range(self.L):
+                    R_buf[l].append(self._batched_areas_R[l].X.copy())
+                for l in range(self.L - 1):
+                    EP_buf[l].append(self._batched_EP[l].X.copy())
+                    EN_buf[l].append(self._batched_EN[l].X.copy())
+
+        X_R = {
+            l: np.mean(np.stack(R_buf[l], axis=0), axis=0)
+            for l in range(self.L)
+        }
+        X_EP = {
+            l: np.mean(np.stack(EP_buf[l], axis=0), axis=0)
+            for l in range(self.L - 1)
+        }
+        X_EN = {
+            l: np.mean(np.stack(EN_buf[l], axis=0), axis=0)
+            for l in range(self.L - 1)
+        }
+        return X_R, X_EP, X_EN
+
     def weight_update(self, X_R_batch, X_EP_batch, X_EN_batch):
         B = len(X_R_batch)
         for l in range(self.L - 1):
@@ -325,6 +500,20 @@ class SNNPC:
             dW  = self.lr * (dW_p - dW_n) - self.reg * g_W
             self.areas[l].W += dW
             self.areas[l].W  = np.maximum(self.areas[l].W, 0.0)
+
+    def weight_update_stacked(self, X_R: dict, X_EP: dict, X_EN: dict):
+        """Hebbian update from batch-averaged outer products (X_* arrays are (B, n))."""
+        B = int(X_R[0].shape[0])
+        for l in range(self.L - 1):
+            ep = X_EP[l]
+            en = X_EN[l]
+            r = X_R[l + 1]
+            dW_p = (ep.T @ r) / B
+            dW_n = (en.T @ r) / B
+            g_W = (self.areas[l].W > 0).astype(np.float64)
+            dW = self.lr * (dW_p - dW_n) - self.reg * g_W
+            self.areas[l].W += dW
+            self.areas[l].W = np.maximum(self.areas[l].W, 0.0)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -374,25 +563,28 @@ def train_snn_pc(model: SNNPC, X_train, y_train,
         ep_cls_acc = []
         for b in range(n_batches):
             idx = perm[b * batch_size: (b + 1) * batch_size]
-            X_R_b, X_EP_b, X_EN_b = [], [], []
-            for i in idx:
-                pA = preprocess_image(X_train[i])
-                label = int(y_train[i]) if (use_classification and model.use_class_area) else None
-                X_R, X_EP, X_EN = model.run_sample_full(
-                    pA,
-                    class_label=label,
-                    class_clamp_gain=class_clamp_gain,
+            pA_B = np.stack([preprocess_image(X_train[i]) for i in idx], axis=0)
+            if use_classification and model.use_class_area:
+                labels_B = y_train[idx].astype(np.int64)
+            else:
+                labels_B = None
+            X_R, X_EP, X_EN = model.run_batch_full(
+                pA_B,
+                class_labels=labels_B,
+                class_clamp_gain=class_clamp_gain,
+            )
+            if use_classification and model.use_class_area:
+                preds = np.argmax(X_R[model.L - 1], axis=1)
+                ep_cls_acc.extend(
+                    (preds == y_train[idx].astype(int)).astype(np.float64).tolist()
                 )
-                X_R_b.append(X_R)
-                X_EP_b.append(X_EP)
-                X_EN_b.append(X_EN)
-                if use_classification and model.use_class_area:
-                    pred = int(np.argmax(X_R[model.L - 1]))
-                    ep_cls_acc.append(1.0 if pred == int(y_train[i]) else 0.0)
+            for bi in range(batch_size):
                 for l in range(model.L - 1):
-                    pred = model.areas[l].W @ X_R[l + 1]
-                    ep_nrmse[l].append(compute_nrmse(X_R[l], pred))
-            model.weight_update(X_R_b, X_EP_b, X_EN_b)
+                    pred = model.areas[l].W @ X_R[l + 1][bi]
+                    ep_nrmse[l].append(
+                        compute_nrmse(X_R[l][bi], pred)
+                    )
+            model.weight_update_stacked(X_R, X_EP, X_EN)
         elapsed = time.time() - t0
         for l in range(model.L - 1):
             history['nrmse'][l].append(float(np.mean(ep_nrmse[l])))
@@ -466,15 +658,21 @@ def add_occlusion(X: np.ndarray, patch_size: int = 9, rng=None) -> np.ndarray:
 # 9.  Evaluation helpers
 # ─────────────────────────────────────────────────────────────
 def get_representations(model: SNNPC, X: np.ndarray,
-                        area: int = 1, verbose: bool = False):
-    N      = len(X)
+                        area: int = 1, verbose: bool = False,
+                        eval_batch_size: int = 32):
+    N = len(X)
     R_list = []
-    for i in range(N):
-        pA = preprocess_image(X[i])
-        X_R, _, _ = model.run_sample_full(pA)
-        R_list.append({l: X_R[l].copy() for l in range(model.L)})
-        if verbose and (i + 1) % 50 == 0:
-            print(f"    {i+1}/{N}")
+    bs = max(1, int(eval_batch_size))
+    done = 0
+    while done < N:
+        chunk = X[done: done + bs]
+        pA_B = np.stack([preprocess_image(chunk[j]) for j in range(len(chunk))], axis=0)
+        X_R, _, _ = model.run_batch_full(pA_B, class_labels=None)
+        for bi in range(len(chunk)):
+            R_list.append({l: X_R[l][bi].copy() for l in range(model.L)})
+        done += len(chunk)
+        if verbose and done % 50 == 0:
+            print(f"    {done}/{N}")
     R_mat = np.array([R_list[i][area] for i in range(N)])
     return R_mat, R_list
 

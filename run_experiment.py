@@ -113,18 +113,22 @@ def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
     return rho, acc, R_list, rdm_inp, rdm_r
 
 
-def eval_class_predictions(model, X_eval, y_eval, verbose=True):
-    """Evaluate direct top-layer class predictions using model.predict_class."""
+def eval_class_predictions(model, X_eval, y_eval, verbose=True, batch_size=32):
+    """Evaluate direct top-layer class predictions (batched forward)."""
     if not model.use_class_area:
         return float('nan'), np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=float)
 
     N = len(X_eval)
     preds = np.zeros(N, dtype=int)
-    for i in range(N):
-        pA = preprocess_image(X_eval[i])
-        preds[i] = model.predict_class(pA)
-        if verbose and (i + 1) % 50 == 0:
-            print(f"    Class pred eval: {i+1}/{N}")
+    bs = max(1, int(batch_size))
+    done = 0
+    while done < N:
+        sl = slice(done, min(done + bs, N))
+        pA_B = np.stack([preprocess_image(X_eval[j]) for j in range(sl.start, sl.stop)], axis=0)
+        preds[sl] = model.predict_classes_batch(pA_B)
+        done = sl.stop
+        if verbose and done % 50 == 0:
+            print(f"    Class pred eval: {done}/{N}")
 
     acc = float(np.mean(preds == y_eval.astype(int))) if N > 0 else float('nan')
     classes = np.array(sorted(np.unique(y_eval.astype(int))), dtype=int)
