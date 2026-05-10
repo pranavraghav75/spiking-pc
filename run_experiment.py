@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
 
-from snn_pc import (SNNPC, train_snn_pc, preprocess_image,
+from snn_pc import (SNNPC, train_snn_pc, preprocess_image, preprocess_batch,
                     compute_rdm, second_order_rsa,
                     get_representations, linear_decode,
                     add_noise, add_occlusion, compute_nrmse)
@@ -113,18 +113,19 @@ def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
     return rho, acc, R_list, rdm_inp, rdm_r
 
 
-def eval_class_predictions(model, X_eval, y_eval, verbose=True):
-    """Evaluate direct top-layer class predictions using model.predict_class."""
+def eval_class_predictions(model, X_eval, y_eval, verbose=True, chunk_size=32):
+    """Evaluate direct top-layer class predictions using model.predict_classes (batched)."""
     if not model.use_class_area:
         return float('nan'), np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=float)
 
     N = len(X_eval)
     preds = np.zeros(N, dtype=int)
-    for i in range(N):
-        pA = preprocess_image(X_eval[i])
-        preds[i] = model.predict_class(pA)
-        if verbose and (i + 1) % 50 == 0:
-            print(f"    Class pred eval: {i+1}/{N}")
+    for start in range(0, N, chunk_size):
+        end = min(start + chunk_size, N)
+        pA_B = preprocess_batch(X_eval[start:end])
+        preds[start:end] = model.predict_classes(pA_B)
+        if verbose:
+            print(f"    Class pred eval: {end}/{N}")
 
     acc = float(np.mean(preds == y_eval.astype(int))) if N > 0 else float('nan')
     classes = np.array(sorted(np.unique(y_eval.astype(int))), dtype=int)

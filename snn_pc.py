@@ -6,10 +6,21 @@ Frontiers in Computational Neuroscience 18:1338280
 Architecture
   Area 0 (784)  →  Area 1 (400)  →  Area 2 (225)  →  Area 3 (64)
   Each area l>0: R^l (representation), E+^l, E-^l (error units)
-  FFG pathway:   R^0 → G (16 gist units) → R^l  [fixed, sparse]
+  FFG pathway:   R^0 → G (16 gist units) → R^l  [fixed, sparse]   (currently disabled)
   Learning:      Hebbian on inter-areal weights W^{l,l+1}
   Neurons:       AdEx (adaptive exponential integrate-and-fire)
   Synapses:      AMPA + NMDA kinetics (rise 5 ms, decay 50 ms)
+
+This file is the BATCHED rewrite. Every neuron group carries a leading
+batch dimension B; the whole T-step rollout for B samples is one Python
+loop of length T (not B*T), and every Hebbian update is a single matmul
+per layer instead of B outer products.
+
+Single-sample callers (predict_class, run_sample_full) are thin wrappers
+over the batched core with B=1.
+
+FFG is not yet implemented in the batched path; constructing with
+use_ffg=True raises NotImplementedError.
 
 FIX vs original:
   PCArea weight init std changed from 0.3/n_R_above → 1.0/n_R_above.
@@ -17,9 +28,6 @@ FIX vs original:
   spike threshold), silently preventing all signal propagation beyond
   Area 0. 1.0/n_R_above delivers ~900 pA, comfortably above threshold.
 """
-
-
-# changes made at 280ish
 
 import numpy as np
 import matplotlib
@@ -47,24 +55,31 @@ VR       = -70.6e-3
 
 
 # ─────────────────────────────────────────────────────────────
-# 1.  AdEx Neuron Group
+# 1.  AdEx Neuron Group  (batched: state shape (B, n))
 # ─────────────────────────────────────────────────────────────
 class NeuronGroup:
-    def __init__(self, n: int, dt: float = 1e-3):
-        self.n   = n
-        self.dt  = dt
-        self.V   = np.full(n, EL, dtype=np.float64)
-        self.a   = np.zeros(n, dtype=np.float64)
-        self.Y   = np.zeros(n, dtype=np.float64)
-        self.X   = np.zeros(n, dtype=np.float64)
-        self.spk = np.zeros(n, dtype=bool)
-        self.ref = np.zeros(n, dtype=int)
+    def __init__(self, n: int, dt: float = 1e-3, B: int = 1):
+        self.n  = n
+        self.B  = B
+        self.dt = dt
+        self._alloc(B)
+
+    def _alloc(self, B: int):
+        n = self.n
+        self.B   = B
+        self.V   = np.full((B, n), EL, dtype=np.float64)
+        self.a   = np.zeros((B, n), dtype=np.float64)
+        self.Y   = np.zeros((B, n), dtype=np.float64)
+        self.X   = np.zeros((B, n), dtype=np.float64)
+        self.spk = np.zeros((B, n), dtype=bool)
+        self.ref = np.zeros((B, n), dtype=np.int32)
 
     def step(self, I_ext: np.ndarray):
+        # I_ext: (B, n)
         dt = self.dt
         V  = self.V
         a  = self.a
-        exp_arg  = np.clip((V - VT) / DELTA_T, -30.0, 20.0) # remove clip function here
+        exp_arg  = np.clip((V - VT) / DELTA_T, -30.0, 20.0)
         exp_term = GL * DELTA_T * np.exp(exp_arg)
         dV = (-GL * (V - EL) + exp_term + I_ext - a) / CM * dt
         da = (C_ADP * (V - EL) - a) / TAU_A * dt
@@ -83,10 +98,13 @@ class NeuronGroup:
         dY = (-self.Y / TAU_DEC) * dt
         self.X += dX
         self.Y += dY
-        self.X  = np.maximum(self.X, 0.0)
-        self.Y  = np.maximum(self.Y, 0.0) 
+        np.maximum(self.X, 0.0, out=self.X)
+        np.maximum(self.Y, 0.0, out=self.Y)
 
-    def reset(self):
+    def reset(self, B: int | None = None):
+        if B is not None and B != self.B:
+            self._alloc(B)
+            return
         self.V[:]   = EL
         self.a[:]   = 0.0
         self.Y[:]   = 0.0
@@ -96,46 +114,28 @@ class NeuronGroup:
 
 
 # ─────────────────────────────────────────────────────────────
-# 2.  Feedforward Gist (FFG) Pathway
+# 2.  Feedforward Gist (FFG) Pathway  — NOT YET BATCHED
 # ─────────────────────────────────────────────────────────────
 class FFGPathway:
-    def __init__(self, n_input: int, n_gist: int,
-                 area_sizes: list, pc: float = 0.05, rng=None):
-        if rng is None:
-            rng = np.random.default_rng()
-        self.n_gist = n_gist
-        self.G = NeuronGroup(n_gist)
-        ratio_ig = n_input / n_gist
-        mask_ig  = (rng.random((n_input, n_gist)) < pc).astype(np.float64)
-        self.W_IG = rng.normal(ratio_ig, ratio_ig, (n_input, n_gist)) * mask_ig
-        self.W_GR = {}
-        for l, ns in enumerate(area_sizes[1:], start=1):
-            ratio_gr = n_gist / ns
-            self.W_GR[l] = rng.normal(ratio_gr, ratio_gr, (n_gist, ns))
-
-    def step(self, X_R0: np.ndarray, dt: float):
-        I_G = (self.W_IG.T @ X_R0) * 1e-12
-        self.G.step(I_G)
-
-    def gist_input(self, l: int) -> np.ndarray:
-        return self.W_GR[l].T @ self.G.X
-
-    def reset(self):
-        self.G.reset()
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(
+            "FFG pathway is not implemented in the batched code path. "
+            "Run with use_ffg=False (CLI: --no-ffg)."
+        )
 
 
 # ─────────────────────────────────────────────────────────────
 # 3.  Predictive-Coding Area
 # ─────────────────────────────────────────────────────────────
 class PCArea:
-    def __init__(self, l: int, n_R: int, n_R_above=None, rng=None):
+    def __init__(self, l: int, n_R: int, n_R_above=None, B: int = 1, rng=None):
         if rng is None:
             rng = np.random.default_rng()
         self.l   = l
         self.n_R = n_R
-        self.R   = NeuronGroup(n_R)
-        self.EP  = NeuronGroup(n_R)
-        self.EN  = NeuronGroup(n_R)
+        self.R   = NeuronGroup(n_R, B=B)
+        self.EP  = NeuronGroup(n_R, B=B)
+        self.EN  = NeuronGroup(n_R, B=B)
         if n_R_above is not None:
             # FIX: std = 1.0/n_R_above  (original was 0.3/n_R_above, sub-threshold)
             scaled_std = 1.0 / n_R_above
@@ -144,14 +144,14 @@ class PCArea:
         else:
             self.W = None
 
-    def reset(self):
-        self.R.reset()
-        self.EP.reset()
-        self.EN.reset()
+    def reset(self, B: int | None = None):
+        self.R.reset(B)
+        self.EP.reset(B)
+        self.EN.reset(B)
 
 
 # ─────────────────────────────────────────────────────────────
-# 4.  Full SNN-PC Network
+# 4.  Full SNN-PC Network  (batched)
 # ─────────────────────────────────────────────────────────────
 class SNNPC:
     def __init__(self, area_sizes=None, n_gist=16,
@@ -166,6 +166,11 @@ class SNNPC:
             area_sizes.append(n_classes)
         if rng is None:
             rng = np.random.default_rng()
+        if use_ffg:
+            raise NotImplementedError(
+                "use_ffg=True is not supported on the batched code path. "
+                "Pass use_ffg=False (CLI: --no-ffg)."
+            )
         self.area_sizes = area_sizes
         self.L          = len(area_sizes)
         self.dt         = dt
@@ -173,7 +178,7 @@ class SNNPC:
         self.reg        = reg
         self.tw         = int(tw_ms / (dt * 1000))
         self.T          = int(T_ms  / (dt * 1000))
-        self.use_ffg    = use_ffg
+        self.use_ffg    = False
         self.I_scale    = 1e-12
         self.syn_gain   = syn_gain
         self.use_class_area = use_class_area
@@ -182,92 +187,56 @@ class SNNPC:
         self.areas = []
         for l in range(self.L):
             n_above = area_sizes[l + 1] if l < self.L - 1 else None
-            self.areas.append(PCArea(l, area_sizes[l], n_above, rng=rng))
-        if use_ffg:
-            self.ffg = FFGPathway(area_sizes[0], n_gist, area_sizes, rng=rng)
+            self.areas.append(PCArea(l, area_sizes[l], n_above, B=1, rng=rng))
 
-    def label_clamp_current(self, label: int, gain: float | None = None) -> np.ndarray:
+    # ── label → class-area clamp current  (batched) ──────────
+    def label_clamp_current(self, labels: np.ndarray,
+                            gain: float | None = None) -> np.ndarray:
+        """
+        labels: (B,) array of int class indices.
+        Returns (B, n_classes) clamp current in pA.
+        """
         if not self.use_class_area:
             raise ValueError("Classification area is disabled.")
         if gain is None:
             gain = self.cls_clamp_gain
-        clamp = np.zeros(self.area_sizes[-1], dtype=np.float64)
-        clamp[label] = gain
+        labels = np.asarray(labels, dtype=np.int64)
+        B = labels.shape[0]
+        n_cls = self.area_sizes[-1]
+        clamp = np.zeros((B, n_cls), dtype=np.float64)
+        clamp[np.arange(B), labels] = gain
         return clamp
 
-    def predict_class(self, pixel_pA: np.ndarray) -> int:
-        if not self.use_class_area:
-            raise ValueError("Classification area is disabled.")
-        X_R, _, _ = self.run_sample_full(pixel_pA, class_label=None)
-        return int(np.argmax(X_R[self.L - 1]))
-
-    def reset_all(self):
+    # ── reset ────────────────────────────────────────────────
+    def reset_all(self, B: int):
         for area in self.areas:
-            area.reset()
-        if self.use_ffg:
-            self.ffg.reset()
+            area.reset(B)
 
-    # def step(self, pixel_pA: np.ndarray):
-    #     areas = self.areas
-    #     dt    = self.dt
-    #     gain  = self.syn_gain # figure out, dont know what this is
-    #     scale = self.I_scale # figure out, dont know what this is
-    #     if self.use_ffg:
-    #         self.ffg.step(areas[0].R.X, dt)
-        
-    #     # starting at R0, then update E0+ and E0-, then update R1 and E1+ and E1-
-    #     for l in range(self.L - 1):
-    #         X_R_below = areas[l].R.X
-    #         pred = areas[l].W @ areas[l + 1].R.X
-    #         # compute spike trace layer by layer, use to update next level
-    #         areas[l].EP.step((X_R_below - pred) * gain * scale)
-    #         areas[l].EN.step((pred - X_R_below) * gain * scale)
-    #         # areas[l].EP.step(X_R_below - pred)
-    #         # areas[l].EN.step(pred - X_R_below)
-    #     areas[0].R.step(pixel_pA * scale)
-    #     # areas[0].R.step(pixel_pA)
-    #     for l in range(1, self.L):
-    #         W_below = areas[l - 1].W
-    #         bu_p = W_below.T @ areas[l - 1].EP.X
-    #         bu_n = W_below.T @ areas[l - 1].EN.X
-    #         td_p = areas[l].EP.X
-    #         td_n = areas[l].EN.X
-    #         I_R = (bu_p - bu_n - td_p + td_n) * gain * scale
-    #         # I_R = (bu_p - bu_n - td_p + td_n)
-    #         if self.use_ffg:
-    #             I_R = I_R + self.ffg.gist_input(l) * gain * scale
-    #             # I_R = I_R + self.ffg.gist_input(l)
-    #         areas[l].R.step(I_R)
-
-# take out gain from all functions
-    def step(self, pixel_pA: np.ndarray, class_label: int | None = None,
+    # ── one timestep over a batch of B samples ───────────────
+    def step(self, pixel_pA: np.ndarray,
+             class_label: np.ndarray | None = None,
              class_clamp_gain: float | None = None):
+
         areas = self.areas
-        dt = self.dt
-        gain = self.syn_gain
+        gain  = self.syn_gain
         scale = self.I_scale
 
-        # if self.use_ffg:
-        #     self.ffg.step(areas[0].R.X, dt)
-
         areas[0].R.step(pixel_pA * scale)
-        td_p = 0.0
-        td_n = 0.0
 
         for l in range(self.L - 1):
-            pred = areas[l].W @ areas[l + 1].R.X
-            X_R_current = areas[l].R.X
-            
-            areas[l].EP.step((X_R_current - pred) * gain * scale)
-            areas[l].EN.step((pred - X_R_current) * gain * scale)
+            W = areas[l].W                              # (n_l, n_l+1)
+            R_above = areas[l + 1].R.X                  # (B, n_l+1)
+            R_below = areas[l].R.X                      # (B, n_l)
 
-            W_below = areas[l].W
-            bu_p = W_below.T @ areas[l].EP.X
-            bu_n = W_below.T @ areas[l].EN.X
+            pred = R_above @ W.T                        # (B, n_l)
+            areas[l].EP.step((R_below - pred) * gain * scale)
+            areas[l].EN.step((pred - R_below) * gain * scale)
 
+            bu_p = areas[l].EP.X @ W                    # (B, n_l+1)
+            bu_n = areas[l].EN.X @ W
 
             if l + 1 < self.L - 1:
-                td_p = areas[l + 1].EP.X
+                td_p = areas[l + 1].EP.X                # (B, n_l+1)
                 td_n = areas[l + 1].EN.X
             else:
                 td_p = 0.0
@@ -275,25 +244,42 @@ class SNNPC:
 
             I_R = (bu_p - bu_n - td_p + td_n) * gain * scale
 
-            # if self.use_ffg:
-            #     I_R = I_R + self.ffg.gist_input(l + 1) * gain * scale
-
-            if self.use_class_area and class_label is not None and (l + 1) == (self.L - 1):
+            if (self.use_class_area and class_label is not None
+                    and (l + 1) == (self.L - 1)):
+                # Overwrite with one-hot label clamp (matches set_I_R semantics).
                 I_R = self.label_clamp_current(class_label, class_clamp_gain) * scale
-                # initially was set as I_R += clamp_current, now we just set I_R to clamp_current
-                # this isn't a gaurantee spike, we're just injecting this signal (clamp_current)
 
             areas[l + 1].R.step(I_R)
- 
 
-    def run_sample_full(self, pixel_pA: np.ndarray, class_label: int | None = None,
-                        class_clamp_gain: float | None = None):
-        self.reset_all()
+    # ── full T-step rollout over a batch ─────────────────────
+    def run_batch(self, pixel_pA: np.ndarray,
+                  class_label: np.ndarray | None = None,
+                  class_clamp_gain: float | None = None):
+        """
+        pixel_pA:    (B, n0) array of input currents (pA).
+        class_label: (B,) int array or None.
+
+        Returns (X_R, X_EP, X_EN), dicts of (B, n_l) time-window means.
+        """
+        pixel_pA = np.asarray(pixel_pA, dtype=np.float64)
+        if pixel_pA.ndim != 2:
+            raise ValueError(f"pixel_pA must be (B, n0); got shape {pixel_pA.shape}")
+        B = pixel_pA.shape[0]
+
+        if class_label is not None:
+            class_label = np.asarray(class_label, dtype=np.int64).reshape(-1)
+            if class_label.shape[0] != B:
+                raise ValueError(
+                    f"class_label batch dim {class_label.shape[0]} "
+                    f"!= pixel_pA batch dim {B}")
+
+        self.reset_all(B)
         n  = self.T
         tw = self.tw
         R_buf  = {l: [] for l in range(self.L)}
         EP_buf = {l: [] for l in range(self.L - 1)}
         EN_buf = {l: [] for l in range(self.L - 1)}
+
         for t in range(n):
             self.step(pixel_pA, class_label=class_label,
                       class_clamp_gain=class_clamp_gain)
@@ -303,28 +289,52 @@ class SNNPC:
                 for l in range(self.L - 1):
                     EP_buf[l].append(self.areas[l].EP.X.copy())
                     EN_buf[l].append(self.areas[l].EN.X.copy())
+
         X_R  = {l: np.mean(R_buf[l],  axis=0) for l in range(self.L)}
         X_EP = {l: np.mean(EP_buf[l], axis=0) for l in range(self.L - 1)}
         X_EN = {l: np.mean(EN_buf[l], axis=0) for l in range(self.L - 1)}
         return X_R, X_EP, X_EN
 
-    def weight_update(self, X_R_batch, X_EP_batch, X_EN_batch):
-        B = len(X_R_batch)
+    # ── single-sample convenience wrappers ───────────────────
+    def run_sample_full(self, pixel_pA: np.ndarray,
+                        class_label: int | None = None,
+                        class_clamp_gain: float | None = None):
+        pA_B = np.asarray(pixel_pA, dtype=np.float64)[None, :]
+        lbl_B = np.array([int(class_label)], dtype=np.int64) if class_label is not None else None
+        X_R, X_EP, X_EN = self.run_batch(pA_B, lbl_B, class_clamp_gain)
+        X_R  = {l: X_R[l][0]  for l in range(self.L)}
+        X_EP = {l: X_EP[l][0] for l in range(self.L - 1)}
+        X_EN = {l: X_EN[l][0] for l in range(self.L - 1)}
+        return X_R, X_EP, X_EN
+
+    def predict_classes(self, pixel_pA: np.ndarray) -> np.ndarray:
+        """pixel_pA: (B, n0). Returns (B,) int predictions."""
+        if not self.use_class_area:
+            raise ValueError("Classification area is disabled.")
+        X_R, _, _ = self.run_batch(pixel_pA, class_label=None)
+        return np.argmax(X_R[self.L - 1], axis=1).astype(int)
+
+    def predict_class(self, pixel_pA: np.ndarray) -> int:
+        return int(self.predict_classes(np.asarray(pixel_pA)[None, :])[0])
+
+    # ── batched Hebbian update ───────────────────────────────
+    def weight_update(self, X_R: dict, X_EP: dict, X_EN: dict):
+        """
+        X_R[l]:  (B, n_l)   for l in [0, L)
+        X_EP[l]: (B, n_l)   for l in [0, L-1)
+        X_EN[l]: (B, n_l)   for l in [0, L-1)
+        """
+        B = next(iter(X_R.values())).shape[0]
         for l in range(self.L - 1):
-            dW_p = np.zeros_like(self.areas[l].W)
-            dW_n = np.zeros_like(self.areas[l].W)
-            for i in range(B):
-                ep = X_EP_batch[i][l]
-                en = X_EN_batch[i][l]
-                r  = X_R_batch[i][l + 1]
-                dW_p += np.outer(ep, r)
-                dW_n += np.outer(en, r)
-            dW_p /= B
-            dW_n /= B
-            g_W = (self.areas[l].W > 0).astype(np.float64)
-            dW  = self.lr * (dW_p - dW_n) - self.reg * g_W
+            ep = X_EP[l]              # (B, n_l)
+            en = X_EN[l]              # (B, n_l)
+            r  = X_R[l + 1]           # (B, n_l+1)
+            dW_p = ep.T @ r / B       # (n_l, n_l+1)
+            dW_n = en.T @ r / B
+            g_W  = (self.areas[l].W > 0).astype(np.float64)
+            dW   = self.lr * (dW_p - dW_n) - self.reg * g_W
             self.areas[l].W += dW
-            self.areas[l].W  = np.maximum(self.areas[l].W, 0.0)
+            np.maximum(self.areas[l].W, 0.0, out=self.areas[l].W)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -343,15 +353,30 @@ def preprocess_image(img_flat: np.ndarray,
     return x * (hi - lo) + lo
 
 
+def preprocess_batch(X: np.ndarray) -> np.ndarray:
+    """X: (B, n) raw pixels in [0, 255]. Returns (B, n) pA, per-sample normalized."""
+    return np.stack([preprocess_image(X[i]) for i in range(len(X))])
+
+
 # ─────────────────────────────────────────────────────────────
-# 6.  Training Loop
+# 6.  NRMSE — works for (n,) or (B, n) (last-axis reduction)
 # ─────────────────────────────────────────────────────────────
 def compute_nrmse(actual, predicted):
-    rmse = np.sqrt(np.mean((actual - predicted) ** 2))
-    r    = actual.max() - actual.min()
-    return 0.0 if r < 1e-10 else rmse / r
+    actual    = np.asarray(actual)
+    predicted = np.asarray(predicted)
+    rmse = np.sqrt(np.mean((actual - predicted) ** 2, axis=-1))
+    r    = actual.max(axis=-1) - actual.min(axis=-1)
+    if np.ndim(rmse) == 0:
+        return 0.0 if r < 1e-10 else float(rmse / r)
+    out = np.zeros_like(rmse, dtype=np.float64)
+    mask = r > 1e-10
+    out[mask] = rmse[mask] / r[mask]
+    return out
 
 
+# ─────────────────────────────────────────────────────────────
+# 7.  Training Loop  (batched)
+# ─────────────────────────────────────────────────────────────
 def train_snn_pc(model: SNNPC, X_train, y_train,
                  n_epochs=50, batch_size=32,
                  verbose=True, log_interval=5,
@@ -367,32 +392,38 @@ def train_snn_pc(model: SNNPC, X_train, y_train,
         'cls_acc'   : [],
         'epoch_time': []
     }
+
     for epoch in range(n_epochs):
-        t0      = time.time()
-        perm    = rng.permutation(N)
+        t0       = time.time()
+        perm     = rng.permutation(N)
         ep_nrmse = {l: [] for l in range(model.L - 1)}
         ep_cls_acc = []
+
         for b in range(n_batches):
             idx = perm[b * batch_size: (b + 1) * batch_size]
-            X_R_b, X_EP_b, X_EN_b = [], [], []
-            for i in idx:
-                pA = preprocess_image(X_train[i])
-                label = int(y_train[i]) if (use_classification and model.use_class_area) else None
-                X_R, X_EP, X_EN = model.run_sample_full(
-                    pA,
-                    class_label=label,
-                    class_clamp_gain=class_clamp_gain,
-                )
-                X_R_b.append(X_R)
-                X_EP_b.append(X_EP)
-                X_EN_b.append(X_EN)
-                if use_classification and model.use_class_area:
-                    pred = int(np.argmax(X_R[model.L - 1]))
-                    ep_cls_acc.append(1.0 if pred == int(y_train[i]) else 0.0)
-                for l in range(model.L - 1):
-                    pred = model.areas[l].W @ X_R[l + 1]
-                    ep_nrmse[l].append(compute_nrmse(X_R[l], pred))
-            model.weight_update(X_R_b, X_EP_b, X_EN_b)
+            pA_B = preprocess_batch(X_train[idx])
+
+            label_B = None
+            if use_classification and model.use_class_area:
+                label_B = y_train[idx].astype(np.int64)
+
+            X_R, X_EP, X_EN = model.run_batch(
+                pA_B,
+                class_label=label_B,
+                class_clamp_gain=class_clamp_gain,
+            )
+
+            if use_classification and model.use_class_area:
+                preds = np.argmax(X_R[model.L - 1], axis=1)
+                ep_cls_acc.extend((preds == label_B).astype(float).tolist())
+
+            for l in range(model.L - 1):
+                # Reconstruction prediction at layer l from layer l+1: (B, n_l).
+                pred_l = X_R[l + 1] @ model.areas[l].W.T
+                ep_nrmse[l].extend(compute_nrmse(X_R[l], pred_l).tolist())
+
+            model.weight_update(X_R, X_EP, X_EN)
+
         elapsed = time.time() - t0
         for l in range(model.L - 1):
             history['nrmse'][l].append(float(np.mean(ep_nrmse[l])))
@@ -418,11 +449,11 @@ def train_snn_pc(model: SNNPC, X_train, y_train,
 
 
 # ─────────────────────────────────────────────────────────────
-# 7.  RSA Utilities
+# 8.  RSA Utilities
 # ─────────────────────────────────────────────────────────────
-# spearman's correlation distance
+# Spearman's rank correlation distance.
 def compute_rdm(representations: np.ndarray) -> np.ndarray:
-    Xr = rankdata(representations, axis=1, method='average')
+    Xr   = rankdata(representations, axis=1, method='average')
     X    = Xr - Xr.mean(axis=1, keepdims=True)
     nrm  = np.linalg.norm(X, axis=1, keepdims=True)
     nrm  = np.maximum(nrm, 1e-10)
@@ -440,7 +471,7 @@ def second_order_rsa(rdm_a: np.ndarray, rdm_b: np.ndarray) -> float:
 
 
 # ─────────────────────────────────────────────────────────────
-# 8.  Perturbation helpers
+# 9.  Perturbation helpers
 # ─────────────────────────────────────────────────────────────
 def add_noise(X: np.ndarray, sigma_pA: float = 300.0, rng=None) -> np.ndarray:
     if rng is None:
@@ -463,18 +494,21 @@ def add_occlusion(X: np.ndarray, patch_size: int = 9, rng=None) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────
-# 9.  Evaluation helpers
+# 10. Evaluation helpers  (chunked batched)
 # ─────────────────────────────────────────────────────────────
 def get_representations(model: SNNPC, X: np.ndarray,
-                        area: int = 1, verbose: bool = False):
-    N      = len(X)
-    R_list = []
-    for i in range(N):
-        pA = preprocess_image(X[i])
-        X_R, _, _ = model.run_sample_full(pA)
-        R_list.append({l: X_R[l].copy() for l in range(model.L)})
-        if verbose and (i + 1) % 50 == 0:
-            print(f"    {i+1}/{N}")
+                        area: int = 1, verbose: bool = False,
+                        chunk_size: int = 32):
+    N = len(X)
+    R_list = [None] * N
+    for start in range(0, N, chunk_size):
+        end = min(start + chunk_size, N)
+        pA_B = preprocess_batch(X[start:end])
+        X_R, _, _ = model.run_batch(pA_B)
+        for j in range(end - start):
+            R_list[start + j] = {l: X_R[l][j].copy() for l in range(model.L)}
+        if verbose:
+            print(f"    {end}/{N}")
     R_mat = np.array([R_list[i][area] for i in range(N)])
     return R_mat, R_list
 
