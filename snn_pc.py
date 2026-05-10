@@ -423,9 +423,9 @@ def get_representations(model: SNNPC, X: np.ndarray,
     return R_mat, R_list
 
 
-def linear_decode(R_tr, y_tr, R_te, y_te):
+def linear_decode(R_tr, y_tr, R_te, y_te, random_state=None):
     from sklearn.linear_model import LogisticRegression
-    clf = LogisticRegression(max_iter=1000, C=1.0, random_state=0)
+    clf = LogisticRegression(max_iter=1000, C=1.0, random_state=random_state)
     clf.fit(R_tr, y_tr)
     return float(clf.score(R_te, y_te)), clf
 

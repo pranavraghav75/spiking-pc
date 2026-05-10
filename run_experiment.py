@@ -84,7 +84,7 @@ def plot_nrmse_curves(history, outpath):
 
 
 def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
-                        n_per_class=None, rng=None):
+                        n_per_class=None, rng=None, decode_random_state=None):
     """
     Returns: rho (RSA vs input), decode_acc
     """
@@ -108,7 +108,8 @@ def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
     rho   = second_order_rsa(rdm_inp, rdm_r)
 
     R_tr_full, _ = get_representations(model, X_train_rep, area=1)
-    acc, _ = linear_decode(R_tr_full, y_train_rep, R_mat, y_eval)
+    acc, _ = linear_decode(R_tr_full, y_train_rep, R_mat, y_eval,
+                          random_state=decode_random_state)
 
     return rho, acc, R_list, rdm_inp, rdm_r
 
@@ -117,7 +118,7 @@ def eval_rsa_and_decode(model, X_eval, y_eval, X_train_rep, y_train_rep,
 # Figure 6
 # ─────────────────────────────────────────────────────────────
 def run_figure6(model, X_train, y_train, X_test, y_test,
-                history, outdir, n_rsa_per_class=12):
+                history, outdir, n_rsa_per_class=12, rng=None):
     print("\n── Figure 6: Representational Learning ──")
     os.makedirs(outdir, exist_ok=True)
 
@@ -131,7 +132,8 @@ def run_figure6(model, X_train, y_train, X_test, y_test,
         outpath=os.path.join(outdir, 'fig6A_recon.png'))
 
     # RSA
-    rng = np.random.default_rng()
+    if rng is None:
+        rng = np.random.default_rng()
     idx = []
     for c in sorted(set(y_test)):
         ci = np.where(y_test == c)[0]
@@ -172,10 +174,12 @@ def run_figure6(model, X_train, y_train, X_test, y_test,
 # Figure 7
 # ─────────────────────────────────────────────────────────────
 def run_figure7(model, X_train, y_train, X_test, y_test, outdir,
-                n_per_class=12, n_rep=5):
+                n_per_class=12, n_rep=5, rng=None,
+                decode_random_state=None):
     print("\n── Figure 7: Robustness ──")
     os.makedirs(outdir, exist_ok=True)
-    rng = np.random.default_rng()
+    if rng is None:
+        rng = np.random.default_rng()
 
     rho_results = {k: [] for k in ('Clean', 'Noise', 'Occlude')}
     acc_results = {k: [] for k in ('Clean', 'Noise', 'Occlude')}
@@ -194,7 +198,8 @@ def run_figure7(model, X_train, y_train, X_test, y_test, outdir,
 
         for name, X_set in [('Clean', X_te), ('Noise', X_no), ('Occlude', X_oc)]:
             rho, acc, R_list, _, _ = eval_rsa_and_decode(
-                model, X_set, y_te, X_train, y_train, rng=rng)
+                model, X_set, y_te, X_train, y_train, rng=rng,
+                decode_random_state=decode_random_state)
             rho_results[name].append(rho)
             acc_results[name].append(acc)
             if rep == 0:
@@ -234,27 +239,29 @@ def run_figure7(model, X_train, y_train, X_test, y_test, outdir,
 # Figure 8
 # ─────────────────────────────────────────────────────────────
 def run_figure8(X_train, y_train, X_test, y_test, outdir,
-                n_epochs, batch_size, n_per_class=12, verbose=True):
+                n_epochs, batch_size, n_per_class=12, verbose=True,
+                rng=None, decode_random_state=None):
     print("\n── Figure 8: FFG Ablation ──")
     os.makedirs(outdir, exist_ok=True)
 
+    if rng is None:
+        rng = np.random.default_rng()
     trained = {}
     for name, use_ffg in [('PC+FFG', True), ('PC-only', False)]:
         print(f"\n  Training {name}...")
-        m = SNNPC(use_ffg=use_ffg, lr=1e-5, reg=1e-7, rng=np.random.default_rng())
+        m = SNNPC(use_ffg=use_ffg, lr=1e-5, reg=1e-7, rng=rng)
         h = train_snn_pc(m, X_train, y_train, n_epochs=n_epochs,
-                         batch_size=batch_size, verbose=verbose)
+                         batch_size=batch_size, verbose=verbose, rng=rng)
         trained[name] = m
 
     # FFG-only: zero out PC weights on a fresh PC+FFG model
     print("\n  Building FFG-only (W=0) model...")
-    m_fgo = SNNPC(use_ffg=True, rng=np.random.default_rng())
+    m_fgo = SNNPC(use_ffg=True, rng=rng)
     for l in range(m_fgo.L - 1):
         m_fgo.areas[l].W[:] = 0.0
     trained['FFG-only'] = m_fgo
 
     # Evaluation set
-    rng = np.random.default_rng()
     idx = []
     for c in sorted(set(y_test)):
         ci  = np.where(y_test == c)[0]
@@ -274,7 +281,8 @@ def run_figure8(X_train, y_train, X_test, y_test, outdir,
         rhos[name] = second_order_rsa(rdm_inp, rdm_r)
 
         R_tr, _ = get_representations(m, X_train, area=1)
-        acc, _  = linear_decode(R_tr, y_train, R_mat, y_ev)
+        acc, _  = linear_decode(R_tr, y_train, R_mat, y_ev,
+                               random_state=decode_random_state)
         accs[name] = acc
 
         _, R_list_all = get_representations(m, X_test, area=1)
@@ -288,7 +296,8 @@ def run_figure8(X_train, y_train, X_test, y_test, outdir,
 
     all_names  = ['Input', 'PC+FFG', 'PC-only', 'FFG-only']
     all_colors = ['gray', 'steelblue', 'salmon', 'mediumpurple']
-    acc_inp, _ = linear_decode(pA_all, y_ev, pA_all, y_ev)
+    acc_inp, _ = linear_decode(pA_all, y_ev, pA_all, y_ev,
+                              random_state=decode_random_state)
 
     for values_d, inp_val, ylabel, fname in [
         (rhos, 1.0,     'Representational similarity (ρ)', 'fig8C.png'),
@@ -317,9 +326,27 @@ def main():
     parser.add_argument('--no-fig8', dest='no_fig8', action='store_true')
     parser.add_argument('--no-ffg',  dest='no_ffg', action='store_true',
                         help='Disable feedforward gist (PC-only main run).')
+    parser.add_argument(
+        '--seed', type=int, default=42,
+        help='Master seed for data subsampling, weight init, shuffle, probes, sklearn decode.'
+    )
+    parser.add_argument(
+        '--non-deterministic', action='store_true',
+        help='Do not seed numpy/sklearn/load_mnist — each run differs (no rerun guarantee).')
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
+
+    if args.non_deterministic:
+        rng = np.random.default_rng()
+        data_seed = None
+        decode_rs = None
+        print('\n[RNG] Non-deterministic run (entropy-seeded generators).')
+    else:
+        rng = np.random.default_rng(args.seed)
+        data_seed = args.seed
+        decode_rs = int(args.seed)
+        print(f'\n[RNG] Reproducible run with seed={args.seed}.')
 
     if args.smoke:
         N_TR, N_TE, N_EP, BS, NRSA, NREP = 5, 5, 2, 5, 5, 2
@@ -330,7 +357,8 @@ def main():
     # ── Data ─────────────────────────────────────────────────
     print("\n=== Loading data ===")
     X_tr, y_tr, X_te, y_te = load_mnist(n_train_per_class=N_TR,
-                                          n_test_per_class=N_TE)
+                                          n_test_per_class=N_TE,
+                                          seed=data_seed)
     print(f"  Train: {X_tr.shape}  Test: {X_te.shape}")
 
     # ── Train main model ─────────────────────────────────────
@@ -341,10 +369,10 @@ def main():
     # Paper's lr=1e-7/reg=1e-5 was calibrated for large late-training traces;
     # at initialization the reg term is 35x stronger and erases weights.
     model = SNNPC(use_ffg=use_ffg_main, lr=1e-5, reg=1e-7,
-                  rng=np.random.default_rng())
+                  rng=rng)
     history = train_snn_pc(model, X_tr, y_tr,
                            n_epochs=N_EP, batch_size=BS,
-                           verbose=True, log_interval=1)
+                           verbose=True, log_interval=1, rng=rng)
 
     np.savez(os.path.join(args.outdir, 'weights.npz'),
              **{f'W{l}': model.areas[l].W for l in range(model.L - 1)})
@@ -352,17 +380,19 @@ def main():
     # ── Figures ──────────────────────────────────────────────
     run_figure6(model, X_tr, y_tr, X_te, y_te, history,
                 outdir=os.path.join(args.outdir, 'fig6'),
-                n_rsa_per_class=NRSA)
+                n_rsa_per_class=NRSA, rng=rng)
 
     run_figure7(model, X_tr, y_tr, X_te, y_te,
                 outdir=os.path.join(args.outdir, 'fig7'),
-                n_per_class=NRSA, n_rep=NREP)
+                n_per_class=NRSA, n_rep=NREP, rng=rng,
+                decode_random_state=decode_rs)
 
     if use_ffg_main and not args.no_fig8:
         run_figure8(X_tr, y_tr, X_te, y_te,
                     outdir=os.path.join(args.outdir, 'fig8'),
                     n_epochs=N_EP, batch_size=BS,
-                    n_per_class=NRSA)
+                    n_per_class=NRSA,
+                    rng=rng, decode_random_state=decode_rs)
     elif not args.no_fig8:
         print("  Skipping Fig 8 ablation because main run is PC-only (--no-ffg).")
 

@@ -109,6 +109,10 @@ def _fetch_real_mnist(n_train_per_class=512, n_test_per_class=128,
 def load_mnist(n_train_per_class=512, n_test_per_class=128,
                seed=42, cache_dir="./mnist_cache",
                verbose=True):
+    """
+    seed=None → numpy picks entropy each run (MNIST subset order non-reproducible).
+    seed=int  → deterministic train/test subsets (default 42).
+    """
 
     data = _fetch_real_mnist(
         n_train_per_class,
