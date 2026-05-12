@@ -1,42 +1,12 @@
-"""
-snn_pc.py — Spiking Neural Network for Predictive Coding
-Faithful replication of Lee et al. (2024)
-Frontiers in Computational Neuroscience 18:1338280
+"""Torch-backed SNN-PC implementation.
 
-Architecture
-    Area 0 (784)  →  Area 1 (400)  →  Area 2 (225)  →  Area 3 (64)
-    Each area l>0: R^l (representation), E+^l, E-^l (error units)
-    FFG pathway:   R^0 → G (16 gist units) → R^l  [fixed, sparse]   (currently disabled)
-    Learning:      Hebbian on inter-areal weights W^{l,l+1}
-    Neurons:       AdEx (adaptive exponential integrate-and-fire)
-    Synapses:      AMPA + NMDA kinetics (rise 5 ms, decay 50 ms)
-
-This file is the BATCHED rewrite. Every neuron group carries a leading
-batch dimension B; the whole T-step rollout for B samples is one Python
-loop of length T (not B*T), and every Hebbian update is a single matmul
-per layer instead of B outer products.
-
-Single-sample callers (predict_class, run_sample_full) are thin wrappers
-over the batched core with B=1.
-
-FFG is not yet implemented in the batched path; constructing with
-use_ffg=True raises NotImplementedError.
-
-FIX vs original:
-    PCArea weight init std changed from 0.3/n_R_above → 1.0/n_R_above.
-    The original value produced ~280 pA to Area 1 (below the ~600 pA
-    spike threshold), silently preventing all signal propagation beyond
-    Area 0. 1.0/n_R_above delivers ~900 pA, comfortably above threshold.
-
-This file has been adapted to run the core dynamics and learning in
-PyTorch so the model can take advantage of GPU acceleration where
-available. The public API and entry points remain numpy-friendly via
-small conversion boundaries at the edges.
+The model state, dynamics, and learning updates run in torch so the network can
+use GPU acceleration. Existing experiment code keeps working through small
+numpy conversion boundaries at the edges.
 """
 
 from __future__ import annotations
 
-import os
 import time
 import warnings
 
@@ -50,9 +20,6 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────────────────────
-# AdEx parameters (Table 1, Brette & Gerstner 2005)
-# ─────────────────────────────────────────────────────────────
 CM = 281e-12
 GL = 30e-9
 EL = -70.6e-3
@@ -84,11 +51,6 @@ def _to_tensor(value, *, device=None, dtype=None):
             tensor = tensor.to(dtype=dtype)
         return tensor
     return torch.as_tensor(value, device=device, dtype=dtype)
-
-
-# ─────────────────────────────────────────────────────────────
-# 1.  AdEx Neuron Group  (batched: state shape (B, n))
-# ─────────────────────────────────────────────────────────────
 
 
 class NeuronGroup:
@@ -150,9 +112,6 @@ class NeuronGroup:
 
 
 class FFGPathway:
-# ─────────────────────────────────────────────────────────────
-# 2.  Feedforward Gist (FFG) Pathway  — NOT YET BATCHED
-# ─────────────────────────────────────────────────────────────
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
             "FFG pathway is not implemented in the torch backend. "
@@ -161,9 +120,6 @@ class FFGPathway:
 
 
 class PCArea:
-# ─────────────────────────────────────────────────────────────
-# 3.  Predictive-Coding Area
-# ─────────────────────────────────────────────────────────────
     def __init__(self, l: int, n_R: int, n_R_above=None, B: int = 1, rng=None, device=None):
         if rng is None:
             rng = np.random.default_rng()
@@ -187,9 +143,6 @@ class PCArea:
 
 
 class SNNPC:
-# ─────────────────────────────────────────────────────────────
-# 4.  Full SNN-PC Network  (batched)
-# ─────────────────────────────────────────────────────────────
     def __init__(self, area_sizes=None, n_gist=16,
                  dt=1e-3, lr=1e-7, reg=1e-5,
                  tw_ms=100, T_ms=350,
@@ -291,16 +244,13 @@ class SNNPC:
                 )
 
         self.reset_all(B)
-        n = self.T
-        tw = self.tw
-
         R_buf = {l: [] for l in range(self.L)}
         EP_buf = {l: [] for l in range(self.L - 1)}
         EN_buf = {l: [] for l in range(self.L - 1)}
 
-        for t in range(n):
+        for t in range(self.T):
             self.step(pixel_pA, class_label=class_label, class_clamp_gain=class_clamp_gain)
-            if t >= n - tw:
+            if t >= self.T - self.tw:
                 for l in range(self.L):
                     R_buf[l].append(self.areas[l].R.X.detach().clone())
                 for l in range(self.L - 1):
@@ -344,9 +294,6 @@ class SNNPC:
             self.areas[l].W.clamp_(min=0.0)
 
 
-# ─────────────────────────────────────────────────────────────
-# 5.  Input Preprocessing
-# ─────────────────────────────────────────────────────────────
 def preprocess_image(img_flat, lo: float = 600.0, hi: float = 3000.0):
     x = _to_tensor(img_flat, device="cpu", dtype=torch.float32) / 255.0
     n = torch.linalg.norm(x)
@@ -363,9 +310,6 @@ def preprocess_batch(X):
     return np.stack([preprocess_image(X[i]) for i in range(len(X))])
 
 
-# ─────────────────────────────────────────────────────────────
-# 6.  NRMSE — works for (n,) or (B, n) (last-axis reduction)
-# ─────────────────────────────────────────────────────────────
 def compute_nrmse(actual, predicted):
     actual_t = _to_tensor(actual, device="cpu", dtype=torch.float32)
     predicted_t = _to_tensor(predicted, device="cpu", dtype=torch.float32)

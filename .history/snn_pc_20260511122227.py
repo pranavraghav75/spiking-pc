@@ -291,16 +291,13 @@ class SNNPC:
                 )
 
         self.reset_all(B)
-        n = self.T
-        tw = self.tw
-
         R_buf = {l: [] for l in range(self.L)}
         EP_buf = {l: [] for l in range(self.L - 1)}
         EN_buf = {l: [] for l in range(self.L - 1)}
 
-        for t in range(n):
+        for t in range(self.T):
             self.step(pixel_pA, class_label=class_label, class_clamp_gain=class_clamp_gain)
-            if t >= n - tw:
+            if t >= self.T - self.tw:
                 for l in range(self.L):
                     R_buf[l].append(self.areas[l].R.X.detach().clone())
                 for l in range(self.L - 1):

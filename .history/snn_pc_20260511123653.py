@@ -291,6 +291,7 @@ class SNNPC:
                 )
 
         self.reset_all(B)
+        # preserve local aliases as in the original batched numpy implementation
         n = self.T
         tw = self.tw
 

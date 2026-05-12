@@ -33,7 +33,7 @@ from load_data import load_mnist
 
 def reconstruct_from_area1(model, X_R_dict):
     """pred_0 = W[0] @ X_R[1]"""
-    return model.areas[0].W.detach().cpu().numpy() @ X_R_dict[1]
+    return model.areas[0].W @ X_R_dict[1]
 
 
 def plot_reconstructions(model, X_samples, y_samples, R_list,
@@ -416,8 +416,7 @@ def main():
     )
 
     np.savez(os.path.join(args.outdir, 'weights.npz'),
-             **{f'W{l}': model.areas[l].W.detach().cpu().numpy()
-                for l in range(model.L - 1)})
+             **{f'W{l}': model.areas[l].W for l in range(model.L - 1)})
 
     # ── Figures ──────────────────────────────────────────────
     run_figure6(model, X_tr, y_tr, X_te, y_te, history,

@@ -150,9 +150,6 @@ class NeuronGroup:
 
 
 class FFGPathway:
-# ─────────────────────────────────────────────────────────────
-# 2.  Feedforward Gist (FFG) Pathway  — NOT YET BATCHED
-# ─────────────────────────────────────────────────────────────
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
             "FFG pathway is not implemented in the torch backend. "
@@ -161,9 +158,6 @@ class FFGPathway:
 
 
 class PCArea:
-# ─────────────────────────────────────────────────────────────
-# 3.  Predictive-Coding Area
-# ─────────────────────────────────────────────────────────────
     def __init__(self, l: int, n_R: int, n_R_above=None, B: int = 1, rng=None, device=None):
         if rng is None:
             rng = np.random.default_rng()
@@ -187,9 +181,6 @@ class PCArea:
 
 
 class SNNPC:
-# ─────────────────────────────────────────────────────────────
-# 4.  Full SNN-PC Network  (batched)
-# ─────────────────────────────────────────────────────────────
     def __init__(self, area_sizes=None, n_gist=16,
                  dt=1e-3, lr=1e-7, reg=1e-5,
                  tw_ms=100, T_ms=350,
@@ -291,16 +282,13 @@ class SNNPC:
                 )
 
         self.reset_all(B)
-        n = self.T
-        tw = self.tw
-
         R_buf = {l: [] for l in range(self.L)}
         EP_buf = {l: [] for l in range(self.L - 1)}
         EN_buf = {l: [] for l in range(self.L - 1)}
 
-        for t in range(n):
+        for t in range(self.T):
             self.step(pixel_pA, class_label=class_label, class_clamp_gain=class_clamp_gain)
-            if t >= n - tw:
+            if t >= self.T - self.tw:
                 for l in range(self.L):
                     R_buf[l].append(self.areas[l].R.X.detach().clone())
                 for l in range(self.L - 1):
@@ -344,9 +332,6 @@ class SNNPC:
             self.areas[l].W.clamp_(min=0.0)
 
 
-# ─────────────────────────────────────────────────────────────
-# 5.  Input Preprocessing
-# ─────────────────────────────────────────────────────────────
 def preprocess_image(img_flat, lo: float = 600.0, hi: float = 3000.0):
     x = _to_tensor(img_flat, device="cpu", dtype=torch.float32) / 255.0
     n = torch.linalg.norm(x)
@@ -363,9 +348,6 @@ def preprocess_batch(X):
     return np.stack([preprocess_image(X[i]) for i in range(len(X))])
 
 
-# ─────────────────────────────────────────────────────────────
-# 6.  NRMSE — works for (n,) or (B, n) (last-axis reduction)
-# ─────────────────────────────────────────────────────────────
 def compute_nrmse(actual, predicted):
     actual_t = _to_tensor(actual, device="cpu", dtype=torch.float32)
     predicted_t = _to_tensor(predicted, device="cpu", dtype=torch.float32)
