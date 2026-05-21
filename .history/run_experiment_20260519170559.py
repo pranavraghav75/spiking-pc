@@ -344,7 +344,7 @@ def main():
                         help='Append a 10-neuron class area and clamp labels during training.')
     parser.add_argument('--class-clamp-gain', type=float, default=800.0,
                         help='Clamp current amplitude (pA domain) for class area labels.')
-    parser.add_argument('--class-force-spike-every', type=int, default=2,
+    parser.add_argument('--class-force-spike-every', type=int, default=0,
                         help='If >0, force a target-class spike every k simulation steps during clamped training.')
     args = parser.parse_args()
 

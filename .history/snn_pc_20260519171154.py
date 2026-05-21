@@ -160,7 +160,7 @@ class SNNPC:
                  use_ffg=True, syn_gain=1000.0,
                  use_class_area=False, n_classes=10,
                  cls_clamp_gain=800.0,
-                 cls_force_spike_every=1,
+                 cls_force_spike_every=0,
                  rng=None):
         if area_sizes is None:
             area_sizes = [784, 400, 225, 64]
