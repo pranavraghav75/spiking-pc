@@ -222,6 +222,8 @@ class SNNPC:
         self.use_class_area = use_class_area
         self.n_classes = n_classes
         self.cls_clamp_gain = cls_clamp_gain
+        if clamp_mode not in ("set_I_R", "add_clamp_gain"):
+            raise ValueError(f"clamp_mode must be 'set_I_R' or 'add_clamp_gain', got {clamp_mode!r}")
         self.clamp_mode = clamp_mode
         self.areas = []
         for l in range(self.L):
